@@ -11,6 +11,7 @@ import json
 from dash.dependencies import Input, Output
 import math
 import plotly.graph_objects as go
+import os
 
 # ------------------ Data Loading and Preparation ------------------ #
 aor_data = pd.read_excel("AOR.xlsx")
@@ -1090,5 +1091,8 @@ def update_windy_src(selected_camp):
         f"&location=coordinates"
         f"&type=map"
     )
-if __name__ == '__main__':
-    app.run(debug=True)
+
+if __name__=='__main__':
+    port = int(os.environ.get("PORT", 8050))
+    # bind to 0.0.0.0 so Render can route to it
+    app.run(host="0.0.0.0", port=port, debug=False)
