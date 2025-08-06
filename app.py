@@ -8,16 +8,14 @@ import numpy as np
 import requests
 import math
 import json
-from dash.dependencies import Input, Output
-import math
+from dash.dependencies import Input, Output, State
 import plotly.graph_objects as go
-import os
 
 # ------------------ Data Loading and Preparation ------------------ #
 aor_data = pd.read_excel("AOR.xlsx")
 # **rename first** so aor_data has CampName
 aor_data.rename(columns={'New_Camp_Name': 'CampName'}, inplace=True)
-
+response_details = pd.read_excel("CampResponseDetails.xlsx")
 fire_data = pd.read_csv("Fire Susceptability Data Block.csv")
 
 # — load camp-level FSI summary (one row per camp) —
@@ -27,7 +25,6 @@ camp_summary = camp_summary.merge(
     aor_data[['CampName','Latitude','Longitude']],
     on='CampName', how='left'
 )
-# ← add this:
 camp_summary = camp_summary.dropna(subset=['Latitude','Longitude'])
 
 
@@ -48,8 +45,6 @@ for feat in geojson_data['features']:
     # 2) move `attributes` → `properties`
     feat['properties'] = feat.pop('attributes')
 
-# Standardize column names & merge datasets
-aor_data.rename(columns={'New_Camp_Name': 'CampName'}, inplace=True)
 merged_data = pd.merge(fire_data, aor_data, on='CampName', how='left')
 if "Block" not in merged_data.columns:
     raise ValueError("❌ 'Block' column not found in dataset! Please check the data.")
@@ -325,12 +320,12 @@ navbar = dbc.Navbar(
                         width="auto",
                         style={"paddingLeft": 0}
                     ),
-                    # 2) Your nav links (Overview, Site Level, About)
+                    # 2) Your nav links (Site Level, Overview, About)
                     dbc.Col(
                         dbc.Nav(
                             [
-                                dbc.NavItem(dbc.NavLink("Overview", href="/overview", active="exact")),
                                 dbc.NavItem(dbc.NavLink("Site Level", href="/",        active="exact")),
+                                dbc.NavItem(dbc.NavLink("Overview", href="/overview", active="exact")),
                                 dbc.NavItem(dbc.NavLink("About",      href="/about",   active="exact")),
                             ],
                             navbar=True
@@ -371,88 +366,198 @@ navbar = dbc.Navbar(
 
 # ------------------ Page Layouts ------------------ #
 def overview_layout():
-    # — Prepare summary table as before —
-    df = camp_summary[[
-        "CampName", "FSI_Calculated", "FWI", "FRI", "FRI_Class"
-    ]].copy()
-    df["FSI_Calculated"] = df["FSI_Calculated"].round(0).astype(int)
-    df["FRI"]           = df["FRI"].round(0).astype(int)
-    df = df.rename(columns={
-        "CampName":       "Camp",
-        "FSI_Calculated": "FSI",
-        "FRI_Class":      "FRI Severity"
-    })
+    # — build a display‐ready df —
+    df = camp_summary.copy()
+    df["Camp"]  = df.CampName
+    df["FSI"]   = np.ceil(df.FSI_Calculated).astype(int)
+    df["FRI"]   = df.FRI.round(0).astype(int)
+    df["FRI Severity"] = df.FRI_Class
 
+    counts = df["FRI Severity"].value_counts().reindex(
+        ["Low risk","Moderate risk","High risk","Extreme risk"], fill_value=0
+    )
+    filter_row = dbc.Row([
+        dbc.Col(html.Label("Filter by FRI Severity:"), width="auto"),
+        dbc.Col(dcc.Dropdown(
+            id="overview-severity-filter",
+            options=[{"label":"All","value":"All"}] +
+                    [{"label":c,"value":c} for c in counts.index],
+            value="All", clearable=False, style={"width":"200px"}
+        ), width="auto"),
+    ], align="center", className="mb-3")
+    # 1) Top-level metrics
+    avg_fsi = math.ceil(df["FSI_Calculated"].mean())
+    avg_fwi = math.ceil(df["FWI"].mean())
+    avg_fri = math.ceil(df["FRI"].mean())
+    counts  = df["FRI_Class"].value_counts().reindex(
+        ["Low risk","Moderate risk","High risk","Extreme risk"], fill_value=0
+    )
+    cards = dbc.Row([
+        dbc.Col(dbc.Card([
+            dbc.CardHeader("Avg. FSI"),
+            dbc.CardBody(html.H4(f"{avg_fsi}", className="card-title"))
+        ], color="warning", inverse=True), width=3),
+        dbc.Col(dbc.Card([
+            dbc.CardHeader("Avg. FWI"),
+            dbc.CardBody(html.H4(f"{avg_fwi}", className="card-title"))
+        ], color="success", inverse=True), width=3),
+        dbc.Col(dbc.Card([
+            dbc.CardHeader("Avg. FRI"),
+            dbc.CardBody(html.H4(f"{avg_fri}", className="card-title"))
+        ], color="secondary", inverse=True), width=3),
+        dbc.Col(dbc.Card([
+            dbc.CardHeader("Extreme-risk camps"),
+            dbc.CardBody(html.H4(f"{counts['Extreme risk']}", className="card-title"))
+        ], color="danger", inverse=True), width=3),
+    ], className="mb-4")
+
+    # 2) Narrative
+    narrative = html.P(
+        f"Out of {len(df)} camps, {counts['Extreme risk']} are Extreme, "
+        f"{counts['High risk']} High, {counts['Moderate risk']} Moderate and "
+        f"{counts['Low risk']} Low risk today. The average FRI is {avg_fri}.",
+        style={"fontSize":"16px", "marginBottom":"1.5rem"}
+    )
+    html.Hr(style={"borderTop": "1px solid #ccc"}),
+
+    # 3) Risk distribution chart
+    dist_fig = px.bar(
+        x=counts.index, y=counts.values,
+        labels={"x":"FRI Severity","y":"Number of Camps"},
+        title="Distribution of Camps by FRI Severity"
+    )
+    dist_fig.update_layout(plot_bgcolor="white", margin={"t":40,"b":20})
+
+    # 4) filter control
+    severity_options = [{"label": cls, "value": cls} for cls in ["All"] + counts.index.tolist()]
+    filter_row = dbc.Row([
+        dbc.Col(html.Label("Filter by FRI Severity:"), width="auto"),
+        dbc.Col(dcc.Dropdown(
+            id="overview-severity-filter",
+            options=severity_options,
+            value="All",
+            clearable=False,
+            style={"width":"200px"}
+        ), width="auto")
+    ], className="mb-3", align="center")
+
+    # 5) Table & Map placeholders (data filled via callback)
     table = dash_table.DataTable(
         id="overview-table",
-        columns=[{"name": c, "id": c} for c in df.columns],
-        data=df.to_dict("records"),
-        sort_action="native",
-        filter_action="native",
-        page_size=20,
-        style_table={"overflowX": "auto"},
-        style_cell={"textAlign": "left", "padding": "5px"},
-        style_header={"backgroundColor": "#f8f9fa", "fontWeight": "bold"},
+        columns=[
+            {"name":"Camp",         "id":"Camp"},
+            {"name":"FSI",          "id":"FSI"},
+            {"name":"FWI",          "id":"FWI"},
+            {"name":"FRI",          "id":"FRI"},
+            {"name":"FRI Severity", "id":"FRI Severity"},
+        ],
+        data=df[["Camp","FSI","FWI","FRI","FRI Severity"]].to_dict("records"),
+        page_size=15,
+        style_table={"overflowX":"auto"},
+        style_cell={"padding":"5px","textAlign":"left"},
     )
-
-    # — Build the choropleth_mapbox for all camps —
-    df_map = camp_summary[["CampName", "Latitude", "Longitude", "FRI"]].copy()
-    df_map["FRI"] = df_map["FRI"].round(0).astype(int)
-
-    # compute overall bounding box
-    lats = df_map["Latitude"]
-    lons = df_map["Longitude"]
+    # compute center from camp_summary
     centre = {
-        "lat": (lats.min() + lats.max()) / 2,
-        "lon": (lons.min() + lons.max()) / 2
+        "lat": camp_summary["Latitude"].mean(),
+        "lon": camp_summary["Longitude"].mean()
     }
-
-    all_geojson = {
-        "type": "FeatureCollection",
-        "features": geojson_data["features"]
-    }
-
     map_fig = px.choropleth_mapbox(
-        df_map,
-        geojson=all_geojson,
-        locations="CampName",
-        featureidkey="properties.CampName",
-        color="FRI",
-        range_color=(0, 100),
-        color_continuous_scale="OrRd",
+        camp_summary.assign(FRI=lambda d: np.floor(d.FRI + 0.5).astype(int)),
+        geojson={"type":"FeatureCollection","features":geojson_data["features"]},
+        locations="CampName", featureidkey="properties.CampName",
+        color="FRI", range_color=(0,100),
         mapbox_style="carto-positron",
-        opacity=0.6,
-        hover_name="CampName",
-        hover_data={"FRI": True},
+        center=centre, zoom=9.5, opacity=0.6,
         title="FRI Heatmap Across All Camps"
     )
+    map = dcc.Graph(id="overview-heatmap", figure=map_fig, config={"displayModeBar":False})
 
-    map_fig.update_layout(
-        mapbox = {
-            "style":       "carto-positron",
-            "center":      centre,
-            "zoom":        9.6,           # lower zoom = zoomed-out
-            "layers": [
-                {
-                    "source": all_geojson,
-                    "type":   "line",
-                    "color":  "black",
-                    "line":   {"width": 1},
-                    "below":  "traces"
-                }
-            ]
-        },
-        margin={"l":0, "r":0, "t":30, "b":0}
-    )
+
+    top5 = df.nlargest(5, "FRI")[["Camp","FRI","FRI Severity"]]
+    bot5 = df.nsmallest(5, "FRI")[["Camp","FRI","FRI Severity"]]
+    tb_row = dbc.Row([
+        dbc.Col(dbc.Card([
+            dbc.CardHeader("Top 5 Highest-Risk Camps"),
+            dbc.CardBody(
+                dash_table.DataTable(
+                    columns=[{"name": c, "id": c} for c in top5.columns],
+                    data=top5.to_dict("records"),
+                    page_action="none",
+                    style_cell={"padding":"3px","textAlign":"left"},
+                )
+            )
+        ]), width=6),
+        dbc.Col(dbc.Card([
+            dbc.CardHeader("Bottom 5 Lowest-Risk Camps"),
+            dbc.CardBody(
+                dash_table.DataTable(
+                    columns=[{"name": c, "id": c} for c in bot5.columns],
+                    data=bot5.to_dict("records"),
+                    page_action="none",
+                    style_cell={"padding":"3px","textAlign":"left"},
+                )
+            )
+        ]), width=6),
+    ], className="mt-4")
 
     return dbc.Container([
         html.H2("Overview of All Camps", className="mt-3"),
+        html.Hr(style={"borderTop": "1px solid #ccc"}),
+        cards,
+        narrative,
+        html.Hr(style={"borderTop": "1px solid #ccc"}),
         dbc.Row([
-            dbc.Col(dcc.Graph(figure=map_fig, config={"displayModeBar": False}), width=6),
+            dbc.Col(dcc.Graph(figure=dist_fig, config={"displayModeBar":False}), width=6),
+            dbc.Col(filter_row, width=6),
+        ], className="mb-4"),
+
+        html.Hr(style={"borderTop": "1px solid #ccc"}),
+        dbc.Row([
             dbc.Col(table, width=6),
-        ], className="mb-4")
+            dbc.Col(map, width=6),
+        ], className="mb-4"),
+        # Divider
+        html.Hr(style={"borderTop": "1px solid #ccc"}),        tb_row
     ], fluid=True)
 
+
+@app.callback(
+    [Output("overview-table",     "data"),
+     Output("overview-heatmap",   "figure")],
+    Input("overview-severity-filter", "value")
+)
+def filter_overview(sev):
+    dff = camp_summary.copy()
+    if sev != "All":
+        dff = dff[dff.FRI_Class == sev]
+   # create a true 'FSI' column (ceiled) and an integer FRI
+    dff = dff.assign(
+        Camp=lambda d: d.CampName,
+        FSI=lambda d: np.ceil(d.FSI_Calculated).astype(int),
+        FRI=lambda d: np.ceil(d.FRI).astype(int),
+    )
+    # now select the new FSI, not FSI_Calculated
+    table_data = (
+        dff[["CampName","FSI","FWI","FRI","FRI_Class"]]
+           .rename(columns={
+               "CampName":"Camp",
+               "FRI_Class":"FRI Severity"
+           })
+           .to_dict("records")
+    )
+    # update map
+    centre = {"lat": dff["Latitude"].mean(), "lon": dff["Longitude"].mean()}
+    fig = px.choropleth_mapbox(
+        dff.assign(FRI=lambda d: np.ceil(d.FRI).astype(int)),
+        geojson={"type":"FeatureCollection","features":geojson_data["features"]},
+        locations="CampName", featureidkey="properties.CampName",
+        color="FRI", range_color=(0,100),
+        mapbox_style="carto-positron",
+        center=centre, zoom=9.5, opacity=0.6
+    )
+    fig.update_layout(margin={"t":30,"b":0,"l":0,"r":0})
+
+    return table_data, fig
 
 
 def site_level_layout():
@@ -470,6 +575,7 @@ def site_level_layout():
                                  "justifyContent": "flex-start"
                              }),
                     width=3),
+                    
             dbc.Col(html.Div([
                 # FSI Icon + Title
                 html.Div([
@@ -528,80 +634,111 @@ def site_level_layout():
                    "textAlign": "center"
                }),
                     width=3)
+                    
         ], align="center", className="mb-3"),
         html.Hr(style={"borderTop": "1px solid #ccc"}),
-
-        # Row 2: Tabs & Graph (Left) and Narrative + Map (Right)
+        # ── Row 1b: Contact toggle ──
         dbc.Row([
             dbc.Col([
-            dcc.Tabs(
-                id="site-fwi-tabs",
-                value="monthly",              # default to monthly
-                children=[
-                    dcc.Tab(label="Monthly",   value="monthly"),
-                    dcc.Tab(label="Current",   value="current"),
-                    dcc.Tab(label="Forecasted",value="forecasted")
-                ]
-            ),
+                html.A(
+                    "Contact Information",
+                    id="contact-toggle",
+                    style={"cursor":"pointer", "textDecoration":"underline", "color":"#007bff"}
+                ),
+                dbc.Collapse(
+                    html.Div(id="contact-content", className="p-3"),
+                    id="contact-collapse",
+                    is_open=False,
+                    style={"backgroundColor":"#f8f9fa", "borderRadius":"5px", "marginTop":"5px"}
+                )
+            ], width=12)
+        ], className="mb-3"),
 
+        html.Hr(style={"borderTop":"1px solid #ccc"}),
+        # Row 2: FRI tabs (left) and FWI tabs (right)
+        dbc.Row([
+            # ─── FRI ───
+            dbc.Col([
+                dcc.Tabs(
+                    id="site-fri-tabs",
+                    value="monthly",
+                    children=[
+                        dcc.Tab(label="Monthly",  value="monthly"),
+                        dcc.Tab(label="Current",  value="current"),
+                        dcc.Tab(label="Forecast", value="forecasted"),
+                    ]
+                ),
                 html.Div(
-                    id="site-fwi-tabs-content",
+                    id="site-fri-content",
                     className="p-3 border",
-                    style={"backgroundColor": "#F8F9FA", "borderRadius": "10px", "marginTop": "10px"}
+                    style={"backgroundColor":"#F8F9FA","borderRadius":"10px","marginTop":"10px"}
                 )
             ], width=6),
-            dbc.Col([
-                html.Div(
-                    id="site-fwi-narrative",
-                    className="p-3 border",
-                    style={"backgroundColor": "#F8F9FA", "borderRadius": "10px"}
-                ),
-                html.Br(),
-                dcc.Graph(id="fire-risk-map", config={"displayModeBar": False})
-            ], width=6)
-        ], align="center", className="mb-3"),
-        html.Hr(style={"borderTop": "1px solid #ccc"}),
 
- # Row 3: Dimensions Bubble Chart + Live Windy Map
-dbc.Row([
-    # Left: FSI dimensions bubble chart
-    dbc.Col(
-        dcc.Graph(id="dimensions-chart", config={"displayModeBar": False}),
-        width=6
-    ),
-    # Right: Windy iframe
+               # ─── FWI ───
     dbc.Col([
-        html.H5(id="wind-map-title", style={"fontWeight":"bold","marginBottom":"10px"}),
-        html.Iframe(
-            id="windy-iframe",
-            style={"width": "100%", "height": "400px", "border": "none"}
+        dcc.Tabs(
+            id="site-fwi-tabs",
+            value="monthly",
+            children=[
+                dcc.Tab(label="Monthly",  value="monthly"),
+                dcc.Tab(label="Current",  value="current"),
+                dcc.Tab(label="Forecast", value="forecasted"),
+            ]
+        ),
+        html.Div(
+            [
+                html.Div(id="site-fwi-content"),
+                html.Div(id="site-fwi-narrative", className="mt-3")
+            ],
+            className="p-3 border",
+            style={"backgroundColor":"#F8F9FA","borderRadius":"10px","marginTop":"10px"
+            }
         )
-    ], width=6)
-], className="mb-3"),
-html.Hr(style={"borderTop": "1px solid #ccc"}),
+    ], width=6),
 
+        ], className="mb-3"),
+        html.Hr(style={"borderTop": "1px solid #ccc"}),
+dbc.Row([
+            # Left: Camp boundary choropleth
+    dbc.Col([
+        html.H4("Camp Boundary FRI Heatmap", style={"textAlign": "center"}),
+        dcc.Graph(id="fire-risk-map", config={"displayModeBar": False})
+    ], width=6),
+            # Right: Live Windy iframe
+            dbc.Col([
+                html.H5(id="wind-map-title",
+                        children="Live Wind Map",
+                        style={"fontWeight":"bold","marginBottom":"10px"}),
+                html.Iframe(
+                    id="windy-iframe",
+                    style={"width": "100%", "height": "400px", "border": "none"}
+                )
+            ], width=6)
+        ], className="mb-3"),
+        html.Hr(style={"borderTop": "1px solid #ccc"}),
         # Row 4: Block-level Bar Chart and Table
         dbc.Row([
-            dbc.Col(
-                dcc.Graph(id="block-bar-chart", config={"displayModeBar": False}),
-                width=6
-            ),
             dbc.Col([
-                html.H5("Fire Susceptibility Indicator Scores", className="mb-2", style={"fontWeight": "bold"}),
-# in your site_level_layout (or wherever you define the DataTable):
-dash_table.DataTable(
-    id="susceptibility-table",
-    columns=[
-        {"name": "Site Block",    "id": "Site Block"},
-        {"name": "FSI Score",     "id": "FSI Score"},
-        {"name": "FSI Class",     "id": "FSI_Class"},
-    ],
-    data=[],  # will be populated by your callback
-    style_table={'overflowX': 'auto'},
-    style_cell={'fontSize': '16px', 'textAlign': 'left'}
-)
+                html.H4("Block-Level Susceptibility Scores", style={"textAlign":"center"}),
+                dcc.Graph(id="block-bar-chart", config={"displayModeBar":False}),
+            ], width=6),
 
-            ], width=6)
+            dbc.Col([
+                html.H4("Fire Susceptibility Indicator Scores", style={"textAlign":"center"}),
+                dash_table.DataTable(
+                    id="susceptibility-table",
+                    columns=[
+                        {"name": "Site Block", "id": "Site Block"},
+                        {"name": "FSI Score",  "id": "FSI Score"},
+                        {"name": "FSI Class",  "id": "FSI_Class"},
+                    ],
+                    data=[],  # will be populated by your callback
+                    style_table={'overflowX': 'auto'},
+                    style_cell={'fontSize': '16px', 'textAlign': 'left'}
+                ),
+            ], width=6),
+
         ], align="center", className="mb-3")
     ], fluid=True)
 
@@ -609,52 +746,74 @@ def about_layout():
     return dbc.Container([
         html.H2("How This Dashboard Works", className="mt-3"),
 
-        html.P(
-            "This interactive dashboard helps aid workers and planners understand and compare fire risk "
-            "across different camps. It brings together two main types of information:"
-        ),
+        html.H4("Data Sources & Update Frequency"),
         html.Ul([
-            html.Li([
-                html.Strong("On-the-ground susceptibility data: "),
-                "We start with detailed surveys of each camp’s environment, fuel load, expected fire behaviour, "
-                "and local response capacity. Those come from our internal Fire Susceptibility Data files."
-            ]),
-            html.Li([
-                html.Strong("Live and historical weather: "),
-                "Daily observations (temperature, humidity, wind, precipitation) at 1 PM local time are pulled "
-                "from the open-source Open-Meteo API. For longer-term trends, we use monthly averages from the "
-                "NASA POWER climate service."
+            html.Li("Camp survey data (FSI): updated regularly"),
+            html.Li("On-the-day weather (FWI): fetched daily at 13:00 local time via Open-Meteo API"),
+            html.Li("Historic climatology: NASA POWER monthly aggregates")
+        ]),
+
+        html.H4("Calculation Methods"),
+        html.Pre(
+            "FSI  = (Environment + Fuel + Behaviour + Response) / 4\n"
+            "FWI  = 0.5·T + 0.1·RH + 0.3·Wind − 0.2·Rain\n"
+            "FRI  = FSI × (1 + FWI/100)",
+            style={"backgroundColor": "#f8f9fa", "padding": "10px", "borderRadius": "5px"}
+        ),
+
+        html.H4("Fire Weather Index (FWI) Thresholds"),
+        html.P(
+            "FWI indicates daily fire weather conditions based on temperature, humidity, wind, and precipitation."
+            " These categories guide preparedness levels."
+        ),
+        html.Table([
+            html.Thead(html.Tr([html.Th("FWI Range"), html.Th("Fire Danger Category")])),
+            html.Tbody([
+                html.Tr([html.Td("0 – 20"), html.Td("Low fire danger (Green)")]),
+                html.Tr([html.Td("21 – 30"), html.Td("Moderate fire danger (Orange)")]),
+                html.Tr([html.Td("31 and above"), html.Td("Severe fire danger (Red)")]),
             ])
-        ]),
+        ], style={"width": "100%", "marginBottom": "2rem"}),
 
+        html.H4("Fire Risk Index (FRI) Thresholds"),
         html.P(
-            "From those inputs we calculate three key indices for every camp:"
+            "FRI combines fire susceptibility and weather indices to estimate overall fire risk at the site level."
         ),
+        html.Table([
+            html.Thead(html.Tr([html.Th("FRI Range"), html.Th("Risk Category")])),
+            html.Tbody([
+                html.Tr([html.Td("0 – 49"), html.Td("Low risk (Green)")]),
+                html.Tr([html.Td("50 – 74"), html.Td("Moderate risk (Orange)")]),
+                html.Tr([html.Td("75 – 99"), html.Td("High risk (Red)")]),
+                html.Tr([html.Td("100 and above"), html.Td("Extreme risk (Dark Red/Purple)")]),
+            ])
+        ], style={"width": "100%", "marginBottom": "2rem"}),
+
+        html.H4("Team & Support"),
+        html.P("Maintained by the XXX Team"),
+        html.P("Contact: xxxxxxxxxxxx"),
+
+        html.H4("Version History"),
         html.Ul([
-            html.Li(html.Strong("FSI (Fire Susceptibility Index): "),
-                    "An average of environment, fuel, behaviour and response scores to show how vulnerable a camp is to fire."),
-            html.Li(html.Strong("FWI (Fire Weather Index): "),
-                    "A simple weather-based score combining temperature, humidity, wind and rain to capture current fire weather."),
-            html.Li(html.Strong("FRI (Fire Risk Index): "),
-                    "A combined metric that adjusts FSI by FWI, so hot, dry, windy days raise the overall risk.")
+            html.Li("v1.0 – Initial release with FSI, FWI & FRI calculations"),
+            html.Li("v1.1 – Added monthly narratives and map filtering"),
+            html.Li("v1.2 – Introduced contact panel and enhanced Overview metrics")
         ]),
 
-        html.P(
-            "Use the dropdown at top right to select any camp.  You’ll see:"
-        ),
-        html.Ul([
-            html.Li("A comparison of all camps’ current FRI ranking."),
-            html.Li("Monthly risk bars, current and 14-day forecasts."),
-            html.Li("An interactive map that zooms to the camp boundary."),
-            html.Li("Block-level susceptibility details and a simple narrative to guide your decisions.")
-        ]),
+        html.H4("Glossary"),
+        html.Table([
+            html.Tr([html.Th("Term"), html.Th("Definition")]),
+            html.Tr([html.Td("FSI"), html.Td("Fire Susceptibility Index")]),
+            html.Tr([html.Td("FWI"), html.Td("Fire Weather Index")]),
+            html.Tr([html.Td("FRI"), html.Td("Fire Risk Index")]),
+            html.Tr([html.Td("Severity classes"), html.Td("Low, Moderate, High, Extreme risk")])
+        ], style={"width": "100%", "marginBottom": "2rem"}),
 
         html.P(
-            "All code and data processing are open and reproducible, combining local survey data with "
-            "trusted public weather APIs so you can keep a constant eye on changing fire risk."
+            "Use the Overview tab for a high-level summary across all camps; "
+            "the Site Level tab drills down to per-camp monthly, current, and forecasted fire risk."
         )
     ], fluid=True)
-
 
 # ------------------ Main App Layout ------------------ #
 app.layout = html.Div([
@@ -686,34 +845,223 @@ def update_wind_title(camp):
 
 
 # ------------------ Multi-Page Navigation Callback ------------------ #
-@app.callback(Output("page-content", "children"),
-              [Input("url", "pathname")])
+@app.callback(Output("page-content","children"), [Input("url","pathname")])
 def display_page(pathname):
-    if pathname == "/about":
-        return about_layout()
-    elif pathname == "/overview":
+    if pathname == "/overview":
         return overview_layout()
-    return site_level_layout()
+    elif pathname == "/about":
+        return about_layout()
+    else:
+        return site_level_layout()
 
-# ------------------ Overview Tab Callback ------------------ #
-@app.callback(
-    Output("overview-tab-content", "children"),
-    [Input("camp-dropdown", "value"),
-     Input("url", "pathname")]
-)
-def render_overview_tab(selected_camp, pathname):
-    if pathname != "/overview":
-        return dash.no_update
-    return html.Div("This page now serves as a high-level summary of the dashboard. Please navigate to the Site Level page for detailed FWI analysis.")
 
-# ------------------ Site Level FWI Tab Callback ------------------ #
 @app.callback(
-    [Output("site-fwi-tabs-content", "children"),
-     Output("site-fwi-narrative",  "children")],
-    [Input("camp-dropdown", "value"),
-     Input("site-fwi-tabs",   "value")]
+    [Output("contact-collapse", "is_open"),
+     Output("contact-content",  "children")],
+    [Input("contact-toggle",     "n_clicks"),
+     Input("camp-dropdown",      "value")],
+    [State("contact-collapse",   "is_open")]
 )
-def render_site_fwi_tab(selected_camp, active_tab):
+def toggle_and_populate_contact(n_clicks, selected_camp, is_open):
+    # toggle only when the link is clicked
+    if not n_clicks:
+        # on initial load, keep it closed with no content
+        return False, dash.no_update
+
+    # find the row in response_details
+    row = response_details.loc[response_details.CampName == selected_camp]
+    if row.empty:
+        return not is_open, html.P("No contact info available for this camp.")
+
+    row = row.iloc[0]
+    # build some paragraphs from each column
+    content = html.Div([
+        html.P([html.Strong("Site-Management focal: "), row["SM focal(Name and Mobile No)"]]),
+        html.P([html.Strong("Sector Focals: "),        row["Sector Focals(Name and Mobile No)"]]),
+        html.P([html.Strong("DMU Lead: "),              row["DMU Lead(Name and Mobile No)"]]),
+        html.P([html.Strong("Infrastructure: "),        row["List of infrastructure"]])
+    ], style={"fontSize":"14px"})
+
+    # flip the collapse state each click
+    return not is_open, content
+   
+# ------------------ Site Level FWI Tab Callback  ------------------ #    
+
+@app.callback(
+    [
+      Output("site-fwi-content",   "children"),
+      Output("site-fwi-narrative", "children")
+    ],
+    [
+      Input("camp-dropdown", "value"),
+      Input("site-fwi-tabs",   "value")
+    ]
+)
+def render_fwi_tab(selected_camp, active_tab):
+    row = camp_summary[camp_summary["CampName"] == selected_camp]
+    if row.empty:
+        return dash.no_update, dash.no_update
+    lat, lon = row.iloc[0][["Latitude","Longitude"]]
+
+    # --- Monthly FWI ---
+    if active_tab == "monthly":
+        year = datetime.now().year
+        # fetch the 12 monthly FWI values
+        monthly = get_monthly_fwi_nasa(lat, lon, year)
+        months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"]
+        df = pd.DataFrame({"month": months, "fwi": monthly})
+        df["fwi"] = df["fwi"].round(0).astype(int)
+
+        # classify each month’s FWI
+        df["risk"] = df["fwi"].apply(categorize_fwi)
+
+        # map a color to each risk level
+        risk_to_color = {
+            "Low fire danger":      "green",
+            "Moderate fire danger": "orange",
+            "Severe fire danger":   "red",
+        }
+        df["text_color"] = df["risk"].map(risk_to_color)
+
+        # build bar chart, using the class as the text label
+        fig = px.bar(
+            df,
+            x="month",
+            y="fwi",
+            labels={"month":"Month", "fwi":"Fire Weather Index"},
+            title=f"Monthly Fire Weather Index ({year}) for {selected_camp}"
+        )
+        fig.update_traces(
+            marker_color="steelblue",
+            text=df["risk"],
+            textposition="outside",
+            textfont=dict(color=df["text_color"], size=12),
+            showlegend=False
+        )
+        fig.update_yaxes(range=[0, 100])    # 0–100 scale
+
+        narrative = html.Div([
+            html.H5("Monthly Fire Weather Index", style={"fontWeight":"bold"}),
+            html.P(
+                "This bar chart shows your camp’s Fire Weather Index—how hot, dry and windy it typically is each month—"
+                "with each bar labeled by its fire-danger category (Low, Moderate, Severe). "
+                "Use this to identify your camp’s climatological fire-weather seasonality and plan seasonal mitigation."
+            )
+        ], style={"fontSize":"14px"})
+
+        return dcc.Graph(figure=fig, config={"displayModeBar":False}), narrative
+
+    # --- Current FWI comparison ---
+    elif active_tab == "current":
+        # build df with class
+        df = (
+            camp_summary[["CampName", "FWI"]]
+            .assign(FWI=lambda d: d.FWI.round(0).astype(int))
+            .sort_values("FWI", ascending=False)
+            .reset_index(drop=True)
+        )
+
+        # selected camp stats
+        fwi_sel = df.loc[df.CampName == selected_camp, "FWI"].iloc[0]
+        rank    = int(df.index[df.CampName == selected_camp][0]) + 1
+        total   = len(df)
+
+        # bar colors (highlight selected camp)
+        colors = ["#EF553B" if c == selected_camp else "#636EFA" for c in df.CampName]
+
+        # classify each camp’s FWI
+        df["risk"] = df["FWI"].apply(categorize_fwi)
+
+        # map each risk to a text color
+        risk_to_color = {
+            "Low fire danger":      "green",
+            "Moderate fire danger": "orange",
+            "Severe fire danger":   "red",
+        }
+        text_colors = df["risk"].map(risk_to_color)
+
+        # build the bar chart, with risk labels
+        fig = px.bar(
+            df,
+            x="CampName",
+            y="FWI",
+            text="risk",
+            labels={"CampName":"Camp","FWI":"Fire Weather Index"},
+            title=f"Current Fire Weather Index (Rank {rank}/{total})"
+        )
+        fig.update_traces(
+            marker_color=colors,
+            textposition="outside",
+            textfont=dict(color=text_colors, size=12),
+            showlegend=False
+        )
+        fig.update_layout(
+            xaxis_tickangle=-45,
+            plot_bgcolor="white",
+            margin=dict(l=40, r=20, t=60, b=120)
+        )
+        fig.update_yaxes(range=[0,100])
+
+        narrative = html.Div([
+            html.H5("Current Fire Weather Summary", style={"fontWeight":"bold"}),
+            html.P(
+                f"Today’s FWI across all camps—highlighting **{selected_camp}** in red—"
+                "shows which sites are experiencing the hottest, driest and windiest conditions right now. "
+                "Bar labels indicate the fire-danger category (Low, Moderate or Severe)."
+            )
+        ], style={"fontSize":"14px"})
+
+        return dcc.Graph(figure=fig, config={"displayModeBar":False}), narrative
+
+
+    # --- 14-day FWI forecast ---
+    else:
+        records = []
+        start = date.today() + timedelta(days=1)
+        for i in range(14):
+            d   = start + timedelta(days=i)
+            w   = get_weather_noon(lat, lon, d.isoformat())
+            fwi = round(calc_fwi_simple(w["temp"], w["rh"], w["wind"], w["precip"]), 0)
+            records.append({
+                "Date": d.strftime("%b %d"),
+                "FWI":  fwi,
+                "Risk": categorize_fwi(fwi)
+            })
+
+        df_fc = pd.DataFrame(records)
+
+        # line chart colored by risk
+        fig = px.line(
+            df_fc,
+            x="Date",
+            y="FWI",
+            color="Risk",
+            markers=True,
+            title=f"14-Day Fire Weather Index Forecast for {selected_camp}",
+            labels={"FWI":"Fire Weather Index"}
+        )
+        fig.update_traces(mode="lines+markers")
+        fig.update_yaxes(range=[0, 100], title="Fire Weather Index")
+
+        # narrative below chart
+        narrative = html.Div([
+            html.H5("14-Day Fire Weather Forecast", style={"fontWeight":"bold"}),
+            html.P(
+                "This line chart projects your camp’s FWI over the next two weeks. "
+                "Each point is labeled by its fire-danger category (Low, Moderate or Severe). "
+                "Hover to see the exact FWI value and risk class for each day."
+            )
+        ], style={"fontSize":"14px"})
+
+        return dcc.Graph(figure=fig, config={"displayModeBar":False}), narrative
+
+# ------------------ Site Level FRI Tab Callback ------------------ #
+@app.callback(
+    Output("site-fri-content", "children"),
+    [Input("camp-dropdown", "value"),
+     Input("site-fri-tabs",   "value")]
+)
+def render_fri_tab(selected_camp, active_tab):
     # get lat/lon
     row = cleaned_data[cleaned_data["CampName"] == selected_camp]
     if row.empty:
@@ -758,7 +1106,7 @@ def render_site_fwi_tab(selected_camp, active_tab):
         )
         fig.update_traces(
             marker_color="steelblue",
-            text=df["risk"],                # <-- show the class, not the number
+            text=df["risk"],                # <-- class display
             textposition="outside",
             textfont=dict(color=df["text_color"], size=12),
             showlegend=False
@@ -767,10 +1115,15 @@ def render_site_fwi_tab(selected_camp, active_tab):
 
         narrative = html.Div([
             html.H5("Monthly Fire Risk Index", style={"fontWeight":"bold"}),
-            html.P("Each bar is classified by risk rather than showing the raw index.")
-        ])
+            html.P(
+                "This bar chart shows each month’s Fire Risk Index—how your camp’s underlying "
+                "susceptibility (FSI) combines with climatological fire-weather trends (FWI). "
+                "Bars are labeled by their risk category (Low, Moderate, High or Extreme) so you "
+                "can spot your camp’s seasonal high‐risk periods."
+            )
+        ], style={"fontSize":"14px"})
 
-        return dcc.Graph(figure=fig, config={"displayModeBar": False}), narrative
+        return dcc.Graph(figure=fig, config={"displayModeBar":False}), narrative
 
     # --- 2) Current comparison bar chart ---
     elif active_tab == "current":
@@ -780,7 +1133,7 @@ def render_site_fwi_tab(selected_camp, active_tab):
             .reset_index(drop=True))
 
         # **ROUND FRI TO WHOLE NUMBER**
-        df['FRI'] = df['FRI'].round(0).astype(int)
+        df['FRI'] = np.ceil(df['FRI']).astype(int)
 
         # selected camp stats
         fri_sel = df.loc[df.CampName==selected_camp, 'FRI'].iloc[0]
@@ -821,15 +1174,16 @@ def render_site_fwi_tab(selected_camp, active_tab):
             plot_bgcolor='white',
             margin=dict(l=40, r=20, t=60, b=120)
         )
-
+        fig.update_yaxes(range=[0, 100])    # if you want the same 0–100 scale
         narrative = html.Div([
             html.H5("Current Fire Risk Summary", style={"fontWeight":"bold"}),
-            html.P(f"{selected_camp} is at **{fri_sel}** ({cls_sel}), "f"ranking **{rank} of {total}** camps."
-        )
+            html.P(
+                f"Right now, **{selected_camp}** is at FRI = **{fri_sel}** ({cls_sel}). "
+                "This chart compares FRI across all camps; bars are colored and labeled by their risk category."
+            )
         ], style={"fontSize":"14px"})
 
-        return dcc.Graph(figure=fig, config={"displayModeBar": False}), narrative
-
+        return dcc.Graph(figure=fig, config={"displayModeBar":False}), narrative
 
     # --- 3) 14-Day Forecasted FRI ---
     elif active_tab == "forecasted":
@@ -867,10 +1221,14 @@ def render_site_fwi_tab(selected_camp, active_tab):
 
         narrative = html.Div([
             html.H5("14-Day Fire Risk Index Forecast", style={"fontWeight":"bold"}),
-            html.P("Hover to see each day's risk class.")
+            html.P(
+                "This line chart projects your camp’s FRI over the next two weeks. "
+                "Each point is color-coded and labeled by its risk category, so you can "
+                "anticipate when fire‐risk will climb and plan staff or resource deployments."
+            )
         ], style={"fontSize":"14px"})
 
-        return dcc.Graph(figure=fig, config={"displayModeBar": False}), narrative
+        return dcc.Graph(figure=fig, config={"displayModeBar":False}), narrative
 
     # fallback
     return dash.no_update, dash.no_update
@@ -878,19 +1236,17 @@ def render_site_fwi_tab(selected_camp, active_tab):
 # ------------------ Site Level Dashboard Update Callback ------------------ #
 @app.callback(
     [
-        Output("site-details", "children"),
-        Output("fsi-index", "children"),
-        Output("fwi-index", "children"),
-        Output("fri-index", "children"),
-        Output("block-bar-chart", "figure"),
-        Output("fire-risk-map", "figure"),
+        Output("site-details",         "children"),
+        Output("fsi-index",            "children"),
+        Output("fwi-index",            "children"),
+        Output("fri-index",            "children"),
+        Output("block-bar-chart",      "figure"),
+        Output("fire-risk-map",        "figure"),
         Output("susceptibility-table", "data"),
-        Output("dimensions-chart", "figure")
     ],
     [Input("camp-dropdown", "value")]
 )
 def update_dashboard(selected_camp):
-    # — block-level data (unchanged) —
     camp_data = cleaned_data[cleaned_data["CampName"] == selected_camp]
     if camp_data.empty:
         return ("No data available", "-", "-", "-",
@@ -935,6 +1291,9 @@ def update_dashboard(selected_camp):
     # use the FWI/FRI already stored in camp_summary
     fwi_value = math.ceil(camp["FWI"])
     fri_value = math.ceil(camp["FRI"])
+    fri_severity= categorize_fri(camp["FRI"]).split()[0]          # “High”
+    fri_label   = f"{fri_value} – {fri_severity}"                     # “26 – High”    
+
     weather_details = (
         f"Temp: {w_today['temp']}°C; "
         f"RH: {w_today['rh']}%; "
@@ -975,7 +1334,6 @@ def update_dashboard(selected_camp):
         y="Score",
         color="Dimension",
         barmode="group",
-        title="Susceptibility Dimension Score by Block",
         text="Score"
     )
 
@@ -1001,7 +1359,10 @@ def update_dashboard(selected_camp):
         camp_summary["CampName"] == selected_camp,
         ["CampName","FRI"]
     ].copy()
-    df_sel["FRI"] = df_sel["FRI"].round(0).astype(int)
+    df_sel["FRI"] = df_sel["FRI"].apply(
+    lambda x: math.ceil(x) if (x - math.floor(x)) > 0.5 
+    else math.floor(x)
+)
 
     # — grab just that camp’s polygon —
     selected_features = [
@@ -1016,19 +1377,34 @@ def update_dashboard(selected_camp):
     centre = {"lat": (max(lats)+min(lats))/2, "lon": (max(lons)+min(lons))/2}
 
     # — draw choropleth_mapbox with a 0–100 colorbar —
+    df_sel = pd.DataFrame([{
+        "CampName": selected_camp,
+        "FRI":      fri_value
+    }])
+
     map_fig = px.choropleth_mapbox(
         df_sel,
         geojson=selected_geojson,
         locations="CampName",
         featureidkey="properties.CampName",
         color="FRI",
-        range_color=(0,100),            # clamp legend
+        range_color=(0,100),
         color_continuous_scale="OrRd",
         mapbox_style="carto-positron",
-        opacity=0.6,
+        center=centre,
+        zoom=11,
+        opacity=0.6,                    # ← don’t forget the comma
         hover_name="CampName",
-        hover_data={"FRI":True},
+        hover_data={"FRI": False},
     )
+
+    map_fig.update_traces(
+        hovertemplate=(
+            "<b>%{hovertext}</b><br>"
+            f"FRI: {fri_label}<extra></extra>"
+        )
+    )
+
 
     map_fig.update_layout(
         mapbox_center=centre,
@@ -1060,8 +1436,7 @@ def update_dashboard(selected_camp):
         fri_text,
         block_bar_fig,
         map_fig,
-        table_data,
-        dimensions_fig
+        table_data
     )
 
 # ------------------ Windy Callback ------------------ #
@@ -1091,8 +1466,5 @@ def update_windy_src(selected_camp):
         f"&location=coordinates"
         f"&type=map"
     )
-
-if __name__=='__main__':
-    port = int(os.environ.get("PORT", 8050))
-    # bind to 0.0.0.0 so Render can route to it
-    app.run(host="0.0.0.0", port=port, debug=False)
+if __name__ == '__main__':
+    app.run(debug=True)
