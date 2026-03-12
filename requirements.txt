@@ -38,3 +38,4 @@ requests
 xarray
 xclim
 gunicorn
+dash-leaflet
