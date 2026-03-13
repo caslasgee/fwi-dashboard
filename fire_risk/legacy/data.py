@@ -21,6 +21,7 @@ BASE_DIR = Path(__file__).resolve().parents[2]
 # -------------------------------------------------------------------
 # LOAD RAW DATA
 # -------------------------------------------------------------------
+equipment_df = pd.read_csv("Fire_Equipment_Map.csv")
 aor_data = pd.read_excel(BASE_DIR / "AOR.xlsx")
 aor_data.rename(columns={"New_Camp_Name": "CampName"}, inplace=True)
 
@@ -28,6 +29,39 @@ response_details = pd.read_excel(BASE_DIR / "CampResponseDetails.xlsx")
 
 fire_data = pd.read_csv(BASE_DIR / "Fire Susceptability Data Block.csv")
 
+# Standardize columns
+equipment_df.columns = [c.strip() for c in equipment_df.columns]
+
+# Clean key fields
+equipment_df["Camp"] = equipment_df["Camp"].astype(str).str.strip()
+equipment_df["Sub_block"] = equipment_df["Sub_block"].astype(str).str.strip()
+equipment_df["Type_of facility"] = equipment_df["Type_of facility"].astype(str).str.strip()
+equipment_df["Overall status"] = equipment_df["Overall status"].astype(str).str.strip()
+
+# Coordinates
+equipment_df["_LATITUDE"] = pd.to_numeric(equipment_df["_LATITUDE"], errors="coerce")
+equipment_df["_LONGITUDE"] = pd.to_numeric(equipment_df["_LONGITUDE"], errors="coerce")
+
+equipment_df = equipment_df.dropna(subset=["_LATITUDE", "_LONGITUDE"]).copy()
+
+# Normalized helper fields
+equipment_df["camp_key"] = equipment_df["Camp"].str.upper().str.strip()
+equipment_df["block_key"] = equipment_df["Sub_block"].str.upper().str.strip()
+equipment_df["facility_key"] = equipment_df["Type_of facility"].str.upper().str.strip()
+equipment_df["status_key"] = equipment_df["Overall status"].str.upper().str.strip()
+
+# Optional: cleaner status grouping
+def normalize_status(x):
+    x = str(x).strip().upper()
+    if "FUNCTIONAL" in x and "NON" not in x:
+        return "Functional"
+    elif "NON" in x:
+        return "Non-functional"
+    elif x in ["", "NAN", "NONE"]:
+        return "Unknown"
+    return "Unknown"
+
+equipment_df["status_group"] = equipment_df["Overall status"].apply(normalize_status)
 
 # -------------------------------------------------------------------
 # CAMP OUTLINE GEOJSON
@@ -191,3 +225,33 @@ camp_summary["FRI"] = (
 camp_summary["FRI_Class"] = camp_summary["FRI"].apply(categorize_fri)
 
 cleaned_data["FSI_Class"] = cleaned_data["FSI_Calculated"].apply(classify_fsi)
+
+# -------------------------------------------------------------------
+# FIRE EQUIPMENT MAP DATA
+# -------------------------------------------------------------------
+equipment_df = pd.read_csv(BASE_DIR / "Fire_Equipment_Map.csv")
+
+equipment_df.columns = [c.strip() for c in equipment_df.columns]
+
+equipment_df["Camp"] = equipment_df["Camp"].astype(str).str.strip()
+equipment_df["Sub_block"] = equipment_df["Sub_block"].astype(str).str.strip()
+equipment_df["Type_of facility"] = equipment_df["Type_of facility"].astype(str).str.strip()
+equipment_df["Overall status"] = equipment_df["Overall status"].astype(str).str.strip()
+
+equipment_df["_LATITUDE"] = pd.to_numeric(equipment_df["_LATITUDE"], errors="coerce")
+equipment_df["_LONGITUDE"] = pd.to_numeric(equipment_df["_LONGITUDE"], errors="coerce")
+
+equipment_df = equipment_df.dropna(subset=["_LATITUDE", "_LONGITUDE"]).copy()
+
+equipment_df["camp_key"] = equipment_df["Camp"].str.upper().str.strip()
+equipment_df["block_key"] = equipment_df["Sub_block"].str.upper().str.strip()
+
+def normalize_equipment_status(x):
+    x = str(x).strip().upper()
+    if "FUNCTIONAL" in x and "NON" not in x:
+        return "Functional"
+    elif "NON" in x:
+        return "Non-functional"
+    return "Unknown"
+
+equipment_df["status_group"] = equipment_df["Overall status"].apply(normalize_equipment_status)

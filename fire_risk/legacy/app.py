@@ -2,6 +2,11 @@
 import os
 import math
 from datetime import date, timedelta
+import dash_leaflet as dl
+from dash import html, dcc
+import dash_bootstrap_components as dbc
+
+from fire_risk.legacy.data import equipment_df
 
 import numpy as np
 import pandas as pd
@@ -16,7 +21,14 @@ from pathlib import Path
 OUTLOOK_YEAR = date.today().year
 OUTLOOK_LABEL = f"Seasonal Outlook {OUTLOOK_YEAR}"
 
-from fire_risk.legacy.data import cleaned_data, camp_summary, response_details, geojson_data, block_geojson
+from fire_risk.legacy.data import (
+    cleaned_data,
+    camp_summary,
+    response_details,
+    geojson_data,
+    block_geojson,
+    equipment_df,
+)
 from fire_risk.legacy.fwi_fri import (
     get_weather_noon,
     get_fwi_xclim,
@@ -508,6 +520,7 @@ app.layout = html.Div(
             size="xl",
             scrollable=True,
         ),
+
         dbc.Offcanvas(
             [
                 html.H4("Action Plan", className="mb-3"),
@@ -520,6 +533,36 @@ app.layout = html.Div(
             scrollable=True,
             style={"width": "420px"},
         ),
+        
+                    dbc.Modal(
+                [
+                    dbc.ModalHeader(dbc.ModalTitle("Access and Infrastructure Map")),
+                    dbc.ModalBody(
+                        [
+                            html.Div(id="equipment-summary-cards", className="mb-3"),
+                            dl.Map(
+                                id="equipment-map",
+                                center=[21.2, 92.15],
+                                zoom=14,
+                                style={"width": "100%", "height": "600px"},
+                                children=[
+                                    dl.TileLayer(),
+                                    dl.LayerGroup(id="equipment-boundary-layer"),
+                                    dl.LayerGroup(id="equipment-marker-layer"),
+                                ],
+                            ),
+                        ]
+                    ),
+                    dbc.ModalFooter(
+                        dbc.Button("Close", id="close-equipment-map", n_clicks=0)
+                    ),
+                ],
+                id="equipment-map-modal",
+                is_open=False,
+                size="xl",
+                scrollable=True,
+            ),
+
         html.Hr(
             style={
                 "margin": "0",
@@ -566,8 +609,69 @@ app.validation_layout = html.Div(
         html.Div(id="overview-kpi-avg-fri"),
         html.Div(id="overview-top5"),
         html.Div(id="overview-narrative"),
+        html.Button(id="btn-open-equipment-map"),
+        html.Button(id="close-equipment-map"),
+        html.Div(id="equipment-summary-cards"),
+        dl.Map(id="equipment-map"),
+        html.Div(id="equipment-boundary-layer"),
+        html.Div(id="equipment-marker-layer"),
+        html.Div(id="equipment-debug", style={"display": "none"}),
     ]
 )
+
+
+@app.callback(
+    Output("equipment-map-title", "children"),
+    Input("block-camp-dropdown", "value"),
+    Input("block-block-dropdown", "value"),
+)
+def update_equipment_map_title(camp, block):
+    if camp and block:
+        return f"Access and Infrastructure Map for Camp {camp}, Block {block}"
+    elif camp:
+        return f"Access and Infrastructure Map – Camp {camp}"
+    return "Access and Infrastructure Map"
+
+
+@app.callback(
+    Output("equipment-debug", "children"),
+    Input("btn-open-equipment-map", "n_clicks"),
+    Input("close-equipment-map", "n_clicks"),
+)
+def debug_equipment_clicks(open_clicks, close_clicks):
+    return f"open={open_clicks}, close={close_clicks}"
+
+def get_equipment_color(status_group):
+    if status_group == "Functional":
+        return "green"
+    elif status_group == "Non-functional":
+        return "red"
+    return "orange"
+
+
+def make_equipment_popup(row):
+    return dl.Popup(
+        html.Div(
+            [
+                html.H6(row.get("Type_of facility", "Equipment"), className="mb-1"),
+                html.P(f"Camp: {row.get('Camp', 'N/A')}", className="mb-1"),
+                html.P(f"Sub-block: {row.get('Sub_block', 'N/A')}", className="mb-1"),
+                html.P(f"Majhee Section: {row.get('Majhee_section', 'N/A')}", className="mb-1"),
+                html.P(f"Landmark: {row.get('Landmark', 'N/A')}", className="mb-1"),
+                html.P(f"Status: {row.get('Overall status', 'N/A')}", className="mb-1"),
+                html.P(f"Water Source: {row.get('Source_of water', 'N/A')}", className="mb-1"),
+                html.P(f"Distance from water: {row.get('Distance from water source', 'N/A')}", className="mb-1"),
+                html.P(f"Material: {row.get('Material', 'N/A')}", className="mb-1"),
+                html.P(f"Facility focal: {row.get('Facility focal name', 'N/A')}", className="mb-1"),
+                html.P(f"DMU: {row.get('DMU', 'N/A')}", className="mb-1"),
+                html.P(f"Warden: {row.get('Warden_name', 'N/A')}", className="mb-1"),
+                html.P(f"Remarks: {row.get('Remarks', 'N/A')}", className="mb-1"),
+            ],
+            style={"minWidth": "260px"}
+        ),
+        maxWidth=350
+    )
+
 
 # -------------------------------------------------------------------
 # BLOCK CAMP → BLOCK DROPDOWN OPTIONS
@@ -591,6 +695,115 @@ def populate_block_dropdown(selected_camp):
 
     block_options = [{"label": b, "value": b} for b in sorted(blocks)]
     return block_options, None
+
+
+@app.callback(
+    Output("equipment-marker-layer", "children"),
+    Output("equipment-summary-cards", "children"),
+    Output("equipment-map", "center"),
+    [Input("block-camp-dropdown", "value"),
+     Input("block-block-dropdown", "value")],
+)
+def update_equipment_map(selected_camp, selected_block):
+    dff = equipment_df.copy()
+
+    if selected_camp:
+        dff = dff[dff["camp_key"] == str(selected_camp).strip().upper()]
+
+    if selected_block:
+        dff = dff[dff["block_key"] == str(selected_block).strip().upper()]
+
+    if dff.empty:
+        summary = dbc.Alert("No equipment found for the selected camp/block.", color="warning")
+        return [], summary, [21.2, 92.15]
+
+    markers = []
+    for _, row in dff.iterrows():
+        marker = dl.CircleMarker(
+            center=[row["_LATITUDE"], row["_LONGITUDE"]],
+            radius=6,
+            color=get_equipment_color(row["status_group"]),
+            fill=True,
+            fillOpacity=0.8,
+            children=[make_equipment_popup(row)],
+        )
+        markers.append(marker)
+
+    total_count = len(dff)
+    functional_count = (dff["status_group"] == "Functional").sum()
+    non_functional_count = (dff["status_group"] == "Non-functional").sum()
+
+    top_types = dff["Type_of facility"].value_counts().head(3).to_dict()
+    top_types_text = " | ".join([f"{k}: {v}" for k, v in top_types.items()]) if top_types else "N/A"
+
+    summary = dbc.Row(
+        [
+            dbc.Col(dbc.Card(dbc.CardBody([html.H6("Total Equipment"), html.H4(total_count)])), md=3),
+            dbc.Col(dbc.Card(dbc.CardBody([html.H6("Functional"), html.H4(functional_count)])), md=3),
+            dbc.Col(dbc.Card(dbc.CardBody([html.H6("Non-functional"), html.H4(non_functional_count)])), md=3),
+            dbc.Col(dbc.Card(dbc.CardBody([html.H6("Top Types"), html.P(top_types_text)])), md=3),
+        ],
+        className="g-2"
+    )
+
+    center = [dff["_LATITUDE"].mean(), dff["_LONGITUDE"].mean()]
+    return markers, summary, center
+
+@app.callback(
+    Output("equipment-boundary-layer", "children"),
+    [Input("block-camp-dropdown", "value"),
+     Input("block-block-dropdown", "value")],
+)
+def update_equipment_boundaries(selected_camp, selected_block):
+    layers = []
+
+    if geojson_data is not None and selected_camp:
+        camp_features = [
+            feat for feat in geojson_data["features"]
+            if str(feat.get("properties", {}).get("CampName", "")).strip().upper()
+            == str(selected_camp).strip().upper()
+        ]
+        if camp_features:
+            layers.append(
+                dl.GeoJSON(
+                    data={"type": "FeatureCollection", "features": camp_features},
+                    options={"style": {"color": "#0033A0", "weight": 2, "fillOpacity": 0.05}},
+                )
+            )
+
+    if block_geojson is not None and selected_camp and selected_block:
+        block_features = []
+        for feat in block_geojson["features"]:
+            props = feat.get("properties", {})
+            camp_name = str(props.get("CampName_1") or props.get("CampName") or "").strip().upper()
+            block_name = str(props.get("BlockLabel") or props.get("BlockName") or "").strip().upper()
+
+            if (
+                camp_name == str(selected_camp).strip().upper()
+                and block_name == str(selected_block).strip().upper()
+            ):
+                block_features.append(feat)
+
+        if block_features:
+            layers.append(
+                dl.GeoJSON(
+                    data={"type": "FeatureCollection", "features": block_features},
+                    options={"style": {"color": "red", "weight": 3, "fillOpacity": 0.08}},
+                )
+            )
+
+    return layers
+
+
+@app.callback(
+    Output("equipment-map-modal", "is_open"),
+    Input("btn-open-equipment-map", "n_clicks"),
+    Input("close-equipment-map", "n_clicks"),
+)
+def toggle_equipment_modal(open_clicks, close_clicks):
+    open_clicks = open_clicks or 0
+    close_clicks = close_clicks or 0
+    return open_clicks > close_clicks
 
 # -------------------------------------------------------------------
 # NAV FILTERS TOGGLE
@@ -1139,19 +1352,43 @@ def build_block_level_content(camp_name, block_name):
                                     f"Current wind direction is {wind_dir_label}"
                                     f"{f' ({wind_dir_deg}°)' if wind_dir_deg is not None else ''}. "
                                     f"Wind speed is {wind_text}, temperature is {temp_text}, "
-                                    f"relative humidity is {rh_text}, and precipitation today is "
-                                    f"{precip_text}. "
-                                    f"{'Live weather feed unavailable; fallback values are being shown.' if source_status != 'live' else ''}"
+                                    f"relative humidity is {rh_text}, and precipitation today is {precip_text}. "
+                                    f"{'Live weather feed unavailable; fallback values are being shown. ' if source_status != 'live' else ''}"
+                                    "These weather conditions influence how easily a fire may ignite and spread if one occurs."
                                 ),
                                 style={"fontSize": "14px", "marginBottom": "10px"},
                             ),
-                             html.P(
+                            html.P(
                                 (
-                                    "Interpretation: the susceptibility score reflects the block’s "
-                                    "underlying structural and behavioral fire vulnerability, while the "
-                                    "weather score reflects current atmospheric conditions that can "
-                                    "accelerate fire spread. The combined FRI indicates the present "
-                                    "level of operational fire concern for this block."
+                                    f"Fire Weather Index (FWI) is {fwi_value}, classified as "
+                                    f"{categorize_fwi(fwi_value)}. "
+                                    "FWI reflects the effect of current weather conditions such as temperature, "
+                                    "humidity, wind, and precipitation on potential fire behaviour."
+                                ),
+                                style={"fontSize": "14px", "marginBottom": "10px"},
+                            ),
+                            html.P(
+                                (
+                                    f"Fire Susceptibility Index (FSI) is {fsi_value}, classified as {fsi_class}. "
+                                    "FSI reflects the block’s underlying vulnerability based on environmental conditions, "
+                                    "fuel load, community behaviour, and response capacity."
+                                ),
+                                style={"fontSize": "14px", "marginBottom": "10px"},
+                            ),
+                            html.P(
+                                (
+                                    f"Fire Risk Index (FRI) is {fri_value}, classified as {fri_severity}. "
+                                    "FRI combines the current fire weather conditions with the block’s existing susceptibility "
+                                    "to indicate the present level of operational fire risk."
+                                ),
+                                style={"fontSize": "14px", "marginBottom": "10px"},
+                            ),
+                            html.P(
+                                (
+                                    "Interpretation: FWI shows how favourable current weather is for fire ignition and spread, "
+                                    "FSI shows how vulnerable the block is to fire, and FRI combines both to show the overall "
+                                    "current fire risk. Higher FRI values mean greater need for preparedness, rapid response, "
+                                    "equipment readiness, and prevention measures in this block."
                                 ),
                                 style={"fontSize": "14px", "marginBottom": "0"},
                             ),
@@ -1180,6 +1417,14 @@ def build_block_level_content(camp_name, block_name):
                                 id="open-action-plan",
                                 n_clicks=0,
                                 color="primary",
+                                className="me-2",
+                            ),
+                            dbc.Button(
+                                "Access and Infrastructure",
+                                id="btn-open-equipment-map",
+                                n_clicks=0,
+                                color="danger",
+                                outline=True,
                             ),
                         ]
                     ),
